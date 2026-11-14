@@ -1,6 +1,7 @@
 // Settings panel (lil-gui), the top-right corner tile, and keyboard shortcuts.
 
-import { params, DEFAULTS, COLOR_MODES, save } from './settings.js';
+import { params, DEFAULTS, MODES, COLOR_MODES, save } from './settings.js';
+import { rebuildFountain } from './fountain.js';
 import { canvas } from './gl.js';
 import { resize, clearTrail } from './render-targets.js';
 import { rebuildParticles } from './particles.js';
@@ -18,11 +19,20 @@ const actions = {
   system: startSystemAudio,
   stopAudio,
   clear: clearTrail,
+  stopSpin() { params.mirrorSpin = 0; refreshGui(); save(); },
   fullscreen() {
     if (document.fullscreenElement) document.exitFullscreen();
     else document.documentElement.requestFullscreen?.().catch(() => {});
   },
   randomize() {
+    if (params.mode === 'Fountain') {
+      Object.assign(params, {
+        fountainHeight: rand(0.7, 1.4), fountainRing: rand(0.15, 0.6),
+        fountainTail: rand(0.05, 0.3),
+      });
+      refreshGui(); save();
+      return;
+    }
     Object.assign(params, {
       flowScale: rand(0.6, 4), evolve: rand(0.03, 0.35), inertia: rand(0.8, 0.97),
       tail: rand(0.45, 0.85), hue: Math.random(), hueSpread: rand(0, 0.6),
@@ -33,17 +43,50 @@ const actions = {
     refreshGui(); save();
   },
   reset() {
-    const oldCount = params.count;
+    const oldCount = params.count, oldFountain = params.fountainCount, oldMode = params.mode;
     Object.assign(params, DEFAULTS);
     if (params.count !== oldCount) rebuildParticles();
+    if (params.fountainCount !== oldFountain) rebuildFountain();
+    shownMode = params.mode;   // defaults already hold both modes' kaleidoscope values
+    if (params.mode !== oldMode) applyMode();
     resize(); refreshGui(); save();
   },
+  toggleMode() {
+    params.mode = MODES[(MODES.indexOf(params.mode) + 1) % MODES.length];
+    applyMode(); refreshGui(); save();
+  },
 };
+
+// Show only the panel controls that the current mode uses. Set once the panel exists.
+let showModeControls = () => {};
+// Each mode keeps its own kaleidoscope settings: mirrors/mirrorSpin are the active
+// mode's values, otherMirrors/otherMirrorSpin the other mode's. Switching swaps them.
+let shownMode = params.mode;
+function applyMode() {
+  if (params.mode !== shownMode) {
+    [params.mirrors, params.otherMirrors] = [params.otherMirrors, params.mirrors];
+    [params.mirrorSpin, params.otherMirrorSpin] = [params.otherMirrorSpin, params.mirrorSpin];
+    shownMode = params.mode;
+  }
+  clearTrail();
+  showModeControls(params.mode === 'Fountain');
+  refreshGui(); save();
+}
 
 // ---------------------------------------------------------------- settings panel
 // lil-gui is loaded from a CDN as a classic script; without it the app runs with no panel.
 if (window.lil) {
   gui = new lil.GUI({ title: 'Particle Flow', container: document.getElementById('panel') });
+  gui.add(params, 'mode', MODES).name('Visual (V)').onChange(applyMode);
+  const fF = gui.addFolder('Fountain');
+  fF.add(params, 'fountainCount', 20, 5000, 10).name('Count').onFinishChange(rebuildFountain);
+  fF.add(params, 'fountainScale', 0.3, 8, 0.01).name('Particle size');
+  fF.add(params, 'fountainTail', 0, 1, 0.001).name('Tail length');
+  fF.add(params, 'fountainSoftness', 0, 4, 0.05).name('Softness');  fF.add(params, 'fountainHeight', 0.3, 2, 0.01).name('Height');
+  fF.add(params, 'fountainLower', 0.1, 1, 0.01).name('Blue fountain height');
+  fF.add(params, 'fountainRing', 0, 1.2, 0.01).name('Ring radius');
+  fF.add(params, 'fountainTilt', -0.2, 1.2, 0.01).name('Camera tilt');
+  fF.add(params, 'fountainSpin', -1, 1, 0.01).name('Camera orbit');
   const fP = gui.addFolder('Particles');
   fP.add(params, 'count', 10, 20000, 10).name('Count').onFinishChange(rebuildParticles);
   fP.add(params, 'speed', 0, 4, 0.01).name('Speed');
@@ -52,21 +95,28 @@ if (window.lil) {
   fP.add(params, 'inertia', 0, 0.99, 0.01).name('Smoothness');
   fP.add(params, 'spread', 0, 2, 0.01).name('Spread');
   const fL = gui.addFolder('Look');
-  fL.add(params, 'tail', 0, 1, 0.001).name('Tail length');
+  const tailCtrl = fL.add(params, 'tail', 0, 1, 0.001).name('Tail length');
   fL.add(params, 'lineWidth', 0.5, 12, 0.1).name('Line width');
   fL.add(params, 'brightness', 0.05, 4, 0.01).name('Brightness');
   fL.add(params, 'headGlow', 0, 4, 0.01).name('Head glow');
   fL.add(params, 'headSize', 2, 16, 0.1).name('Head size');
-  fL.add(params, 'tailGlow', 0, 2, 0.01).name('Tail glow');
-  fL.add(params, 'colorMode', COLOR_MODES).name('Color mode');
-  fL.add(params, 'hue', 0, 1, 0.001).name('Hue');
-  fL.add(params, 'hueSpread', 0, 1, 0.001).name('Hue spread');
-  fL.add(params, 'hueCycle', 0, 0.3, 0.001).name('Hue cycling');
+  const tailGlowCtrl = fL.add(params, 'tailGlow', 0, 2, 0.01).name('Tail glow');
+  // The fountain colours by height, so the hue controls only apply to Flow.
+  const hueCtrls = [
+    fL.add(params, 'colorMode', COLOR_MODES).name('Color mode'),
+    fL.add(params, 'hue', 0, 1, 0.001).name('Hue'),
+    fL.add(params, 'hueSpread', 0, 1, 0.001).name('Hue spread'),
+    fL.add(params, 'hueCycle', 0, 0.3, 0.001).name('Hue cycling'),
+  ];
   fL.add(params, 'saturation', 0, 1, 0.01).name('Saturation');
   fL.add(params, 'resolution', 0.5, 1, 0.05).name('Resolution').onFinishChange(resize);
   const fK = gui.addFolder('Kaleidoscope');
   fK.add(params, 'mirrors', 1, 16, 1).name('Segments (1 = off)');
-  fK.add(params, 'mirrorSpin', -1, 1, 0.01).name('Rotation speed');
+  // Rotation speed snaps to 0 near the middle of the slider, so it's easy to stop by hand.
+  const spin = fK.add(params, 'mirrorSpin', -1, 1, 0.01).name('Rotation speed').onChange(v => {
+    if (v !== 0 && Math.abs(v) < 0.05) { params.mirrorSpin = 0; spin.updateDisplay(); }
+  });
+  fK.add(actions, 'stopSpin').name('Stop rotation (0)');
   const fT = gui.addFolder('Touch');
   fT.add(params, 'attract', 0, 3, 0.01).name('Attraction');
   fT.add(params, 'swirl', -2, 2, 0.01).name('Swirl');
@@ -80,6 +130,14 @@ if (window.lil) {
   gui.add(actions, 'fullscreen').name('Fullscreen (F)');
   gui.add(actions, 'reset').name('Reset settings');
   gui.onChange(save);
+  showModeControls = fountain => {
+    fF.show(fountain);
+    fP.show(!fountain);
+    fT.show(!fountain);
+    // Fountain has its own Tail length (in its folder) and crisp tails with no glow
+    [...hueCtrls, tailCtrl, tailGlowCtrl].forEach(c => c.show(!fountain));
+  };
+  showModeControls(params.mode === 'Fountain');
 }
 
 // ---------------------------------------------------------------- settings corner
@@ -119,6 +177,8 @@ addEventListener('keydown', e => {
     case 'f': actions.fullscreen(); break;
     case 'c': clearTrail(); break;
     case 'r': actions.randomize(); break;
+    case 'v': actions.toggleMode(); break;
+    case '0': actions.stopSpin(); break;
     case 'm': params.mirrors = params.mirrors >= 12 ? 1 : params.mirrors < 3 ? 3 : params.mirrors + (params.mirrors < 8 ? 1 : 4);
               refreshGui(); save(); break;
     case ' ': ui.paused = !ui.paused; e.preventDefault(); break;

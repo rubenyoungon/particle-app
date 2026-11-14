@@ -3,18 +3,26 @@
 import { params } from './settings.js';
 import { showHint } from './hint.js';
 
-// Levels are 0..1. kick is 1 on a bass beat and decays; hueKick grows with each beat.
+// Levels are 0..1; level is the overall loudness. kick is 1 on a bass beat and
+// decays; beat is true only on the frame a beat is detected; hueKick grows with
+// each beat.
 export const audio = { ctx: null, analyser: null, data: null, srcNode: null, stream: null,
-                       mode: 'off', bass: 0, mid: 0, high: 0, bassAvg: 0, kick: 0, lastKick: 0, hueKick: 0 };
+                       mode: 'off', bass: 0, mid: 0, high: 0, level: 0, bassAvg: 0, bassDev: 0, bassPrev: 0,
+                       kick: 0, beat: false, lastKick: 0, hueKick: 0 };
 
 const meter = document.getElementById('meter');
+
+// How far above its recent average the bass must jump to count as a beat, in
+// multiples of how much it usually varies. Lower catches more beats.
+const BEAT_THRESHOLD = 1.4;
 
 function ensureAudio() {
   if (!audio.ctx) {
     audio.ctx = new (window.AudioContext || window.webkitAudioContext)();
     audio.analyser = audio.ctx.createAnalyser();
-    audio.analyser.fftSize = 2048;
-    audio.analyser.smoothingTimeConstant = 0.7;
+    // A short window and light smoothing, so beats show up without lag.
+    audio.analyser.fftSize = 1024;
+    audio.analyser.smoothingTimeConstant = 0.2;
     audio.analyser.minDecibels = -85;
     audio.analyser.maxDecibels = -20;
     audio.data = new Uint8Array(audio.analyser.frequencyBinCount);
@@ -68,7 +76,9 @@ export function analyzeAudio(dt, time) {
   const ease = (cur, target, rate) => cur + (target - cur) * Math.min(1, dt * rate);
   if (audio.mode === 'off') {
     audio.bass = ease(audio.bass, 0, 5); audio.mid = ease(audio.mid, 0, 5); audio.high = ease(audio.high, 0, 5);
+    audio.level = ease(audio.level, 0, 5);
     audio.kick *= Math.exp(-dt * 5);
+    audio.beat = false;
     return;
   }
   const d = audio.data, hz = audio.ctx.sampleRate / audio.analyser.fftSize;
@@ -84,10 +94,21 @@ export function analyzeAudio(dt, time) {
   audio.bass = ease(audio.bass, shape(b), 15);
   audio.mid  = ease(audio.mid,  shape(m * 1.2), 12);
   audio.high = ease(audio.high, shape(h * 1.8), 8);
-  audio.bassAvg = ease(audio.bassAvg, b, 1.5);
-  if (b > audio.bassAvg * 1.25 + 0.04 / sens && time - audio.lastKick > 0.18) {
+  // Overall loudness: silence (below the noise floor) is 0.
+  audio.level = ease(audio.level, shape(0.5 * b + 0.35 * m * 1.2 + 0.15 * h * 1.8), 6);
+  // Beat: the bass jumps well above its recent average, measured against how
+  // much it usually wobbles around that average. The spectrum is in decibels,
+  // so a fixed ratio (as before) needed a huge jump and missed most beats; this
+  // adapts to each track's own dynamics instead.
+  const jump = b - audio.bassAvg;
+  audio.beat = b > audio.bassPrev && jump > BEAT_THRESHOLD * audio.bassDev / sens + 0.008
+               && time - audio.lastKick > 0.1;
+  if (audio.beat) {
     audio.kick = 1; audio.lastKick = time; audio.hueKick += 0.06;
   }
+  audio.bassAvg = ease(audio.bassAvg, b, 3);
+  audio.bassDev = ease(audio.bassDev, Math.abs(jump), 3);
+  audio.bassPrev = b;
   audio.kick *= Math.exp(-dt * 5);
   const bars = meter.children;
   [audio.bass, audio.mid, audio.high].forEach((v, i) => bars[i].style.height = (2 + v * 38) + 'px');

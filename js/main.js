@@ -7,11 +7,17 @@ import { kaleido, updateAttractors } from './input.js';
 import { audio, analyzeAudio } from './audio.js';
 import { ui } from './ui.js';
 import { simulate, fadeTrails, drawParticles, present } from './renderer.js';
+import { simulateFountain, drawFountain } from './fountain.js';
 
 resize();
 rebuildParticles();
 
-let last = performance.now(), time = 0, flowTime = 0, hueTime = 0;
+// Fountain flow (share of particles in the air) when no audio is being captured.
+const IDLE_FLOW = 0.5;
+// Share of the parked fountain particles launched at once on each beat.
+const BEAT_BURST = 0.5;
+
+let last = performance.now(), time = 0, flowTime = 0, hueTime = 0, fountainYaw = 0;
 
 function frameLoop(now) {
   requestAnimationFrame(frameLoop);
@@ -23,47 +29,81 @@ function frameLoop(now) {
   analyzeAudio(realDt, time);
 
   const react = params.audioReact;
+  // Sound changes motion and colour only; particle size and brightness stay steady.
   const speedMul = 1 + audio.bass * react * 1.5;
-  const brightMul = 1 + audio.mid * react * 1.2;
-  // Highs pulse the head size. The tail keeps a steady width: a width that changes
-  // every frame would be baked into the tail as jagged steps.
-  const headMul = 1 + audio.high * react * 1.2;
   flowTime += dt * params.evolve * speedMul;
   hueTime += dt * params.hueCycle;
   kaleido.rot += dt * params.mirrorSpin;
 
   const attractors = updateAttractors(realDt);
 
-  if (dt > 0) {
-    simulate(dt, {
-      time: flowTime,
-      speed: params.speed * speedMul,
-      scale: params.flowScale,
-      inertia: params.inertia,
-      spread: params.spread,
-      attract: params.attract,
-      swirl: params.swirl,
-      kick: audio.kick * react * 0.8,
-      attractors,
-    });
+  const fountain = params.mode === 'Fountain';
+  fountainYaw += dt * params.fountainSpin;
 
-    fadeTrails(Math.pow(1 - Math.pow(10, -(0.7 + params.tail * 2.3)), dt * 60));
+  if (dt > 0) {
+    if (fountain) {
+      simulateFountain(dt, {
+        time,
+        height: params.fountainHeight,
+        ring: params.fountainRing,
+        // Only the rhythm drives the fountain: each beat gives an upward boost
+        // (capped by the shader at MAX_RISE times a normal arc's height).
+        power: 1,
+        kick: audio.kick * react * 0.7,
+        // With computer audio captured, each beat launches a burst of the parked
+        // particles at once, followed by a short tail as the kick decays, with
+        // only a trickle in between while music is audible. With no audio
+        // captured it blows steadily at IDLE_FLOW.
+        flow: audio.mode === 'off' ? IDLE_FLOW
+            : Math.min(1, audio.level * 4) * (0.1 + 0.4 * audio.kick),
+        burst: audio.beat ? Math.min(0.9, BEAT_BURST * react) : 0,
+      });
+    } else {
+      simulate(dt, {
+        time: flowTime,
+        speed: params.speed * speedMul,
+        scale: params.flowScale,
+        inertia: params.inertia,
+        spread: params.spread,
+        attract: params.attract,
+        swirl: params.swirl,
+        kick: audio.kick * react * 0.8,
+        attractors,
+      });
+    }
+
+    const tail = fountain ? params.fountainTail : params.tail;
+    fadeTrails(Math.pow(1 - Math.pow(10, -(0.7 + tail * 2.3)), dt * 60));
 
     const widthPx = Math.max(1, params.lineWidth * pixelRatio());
-    const densityComp = Math.min(8, Math.max(0.3, Math.sqrt(20000 / particles.count)));
-    drawParticles({
+    const count = fountain ? params.fountainCount : particles.count;
+    const densityComp = Math.min(8, Math.max(0.3, Math.sqrt(20000 / count)));
+    if (fountain) {
+      const headPx = widthPx * params.fountainScale * params.headSize;
+      drawFountain({
+        widthPx: headPx,                                           // tails as wide as the heads
+        headSizePx: headPx,
+        intensity: params.brightness * 0.1 * densityComp,
+        headIntensity: params.brightness * 0.55,  // heads show their colour directly, subdued
+        saturation: params.saturation,
+        headGlow: params.headGlow,
+      }, {
+        dt, yaw: fountainYaw, tilt: params.fountainTilt, zoom: 1.15, height: params.fountainHeight,
+        lower: params.fountainLower,
+      });
+    } else drawParticles({
       widthPx,
-      headSizePx: widthPx * params.headSize * headMul,
+      headSizePx: widthPx * params.headSize,
       hue: params.hue + hueTime + audio.hueKick * react,
       hueSpread: params.hueSpread,
       saturation: params.saturation,
-      intensity: params.brightness * 0.12 * brightMul * densityComp,
+      intensity: params.brightness * 0.12 * densityComp,
       colorMode: Math.max(0, COLOR_MODES.indexOf(params.colorMode)),
       tailGlow: params.tailGlow,
       headGlow: params.headGlow,
     });
   }
 
-  present(Math.round(params.mirrors), kaleido.rot);
+  present(Math.round(params.mirrors), kaleido.rot, fountain, fountain ? params.fountainSoftness : 0);
 }
 requestAnimationFrame(frameLoop);

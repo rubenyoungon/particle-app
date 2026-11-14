@@ -84,7 +84,11 @@ void main(){
     float near = smoothstep(0.0, 0.08, r);
     target += (dir * near + vec2(-dir.y, dir.x) * u_swirl * (0.3 + near)) * (0.8 * u_attract * A.z);
   }
-  target += normalize(p + 1e-4) * u_kick;   // sound beats push outward
+  // Sound beats surge the flow itself. A straight outward push would carry every
+  // particle to the screen edges (and keep them there through the wrap-around);
+  // the curl flow has no net drift, so beats stir the particles without moving
+  // them all one way.
+  target += flow * (0.18 * u_kick);
 
   // Each particle also drifts in its own slowly turning direction, so particles
   // pulled together by a touch gradually spread out again.
@@ -205,12 +209,64 @@ void main(){
 export const SOLID_FS = `#version 300 es
 precision highp float; uniform vec4 u_color; out vec4 o; void main(){ o = u_color; }`;
 
+// Fountain: wherever red and blue mix into purple (tails crossing, see-through
+// head edges, the Softness blur), turn that purple into a warm white instead:
+// the purple part (red and blue both above green) is moved into green and
+// taken out of blue, and brightened a little.
+const NO_PURPLE = /* glsl */`
+vec3 noPurple(vec3 c){
+  float p = max(0.0, min(c.r, c.b) - c.g);
+  return min(c + p * vec3(0.3, 1.0, -0.2), vec3(1.0));
+}`;
+
+// Soft focus (Fountain's Softness): the finished image is shrunk step by step
+// to a fraction of the screen size, then stretched back up smoothly, so
+// neighbouring particles melt together the way a low-resolution visualizer did.
+
+// Shrink by half: average a 4x4 block of source pixels (4 bilinear taps), so
+// small details blend instead of flickering in and out.
+export const DOWN_FS = /* glsl */`#version 300 es
+precision highp float;
+in vec2 v_uv; out vec4 o;
+uniform sampler2D u_src;
+uniform vec2 u_texel;   // 1 / source size
+void main(){
+  vec2 d = u_texel;
+  o = 0.25 * (texture(u_src, v_uv + vec2(-d.x, -d.y)) + texture(u_src, v_uv + vec2(d.x, -d.y))
+            + texture(u_src, v_uv + vec2(-d.x,  d.y)) + texture(u_src, v_uv + vec2(d.x,  d.y)));
+}`;
+
+// Stretch two shrunk images (the levels just above and below the Softness
+// value) back to the screen with a 3x3 tent filter (on top of bilinear
+// sampling), so no blocky pixels show, and mix them by the fraction in between.
+export const UP_FS = /* glsl */`#version 300 es
+precision highp float;
+in vec2 v_uv; out vec4 o;
+uniform sampler2D u_lo, u_hi;      // less and more shrunk
+uniform vec2 u_texelLo, u_texelHi; // 1 / their sizes
+uniform float u_mix;               // 0 = all u_lo, 1 = all u_hi
+${NO_PURPLE}
+vec3 tent(sampler2D s, vec2 texel){
+  vec3 c = vec3(0.0);
+  for (int y = -1; y <= 1; y++)
+    for (int x = -1; x <= 1; x++) {
+      float w = (x == 0 ? 2.0 : 1.0) * (y == 0 ? 2.0 : 1.0);
+      c += w * texture(s, v_uv + vec2(x, y) * texel).rgb;
+    }
+  return c / 16.0;
+}
+void main(){
+  // the blur mixes red and blue neighbours, so fix purple again afterwards
+  o = vec4(noPurple(mix(tent(u_lo, u_texelLo), tent(u_hi, u_texelHi), u_mix)), 1.0);
+}`;
+
 // Final pass: kaleidoscope fold + tone mapping.
 export const DISPLAY_FS = /* glsl */`#version 300 es
 precision highp float;
 in vec2 v_uv; out vec4 o;
-uniform sampler2D u_tex, u_head;
-uniform float u_aspect, u_segments, u_rot;
+uniform sampler2D u_tex, u_head, u_cover;
+uniform float u_aspect, u_segments, u_rot, u_opaqueHeads;
+${NO_PURPLE}
 void main(){
   vec2 p = v_uv * 2.0 - 1.0;
   p.x *= u_aspect;
@@ -221,6 +277,20 @@ void main(){
     p = length(p) * vec2(cos(a), sin(a));
   }
   vec2 uv = vec2(p.x / u_aspect, p.y) * 0.5 + 0.5;
-  vec3 c = texture(u_tex, uv).rgb + texture(u_head, uv).rgb;
-  o = vec4(1.0 - exp(-c), 1.0);
+  vec3 t = texture(u_tex, uv).rgb;
+  vec4 h = texture(u_head, uv);
+  if (u_opaqueHeads > 0.5) {
+    // Heads (premultiplied colour) laid over the tone-mapped trails. Where red and
+    // blue heads overlap (both cover sums high), the colour turns white.
+    vec3 c = (1.0 - exp(-t)) * (1.0 - h.a) + h.rgb;
+    vec2 rb = texture(u_cover, uv).rg;
+    float w = 0.9 * smoothstep(0.3, 1.2, min(rb.r, rb.g));
+    // Red turns white by way of orange (not pink): where the colour is reddish,
+    // aim first at orange, and only at white as the overlap gets strong.
+    vec3 warm = mix(vec3(1.0, 0.55, 0.12), vec3(1.0), smoothstep(0.5, 0.9, w));
+    vec3 target = mix(vec3(1.0), warm, clamp((c.r - c.b) * 2.0, 0.0, 1.0));
+    o = vec4(noPurple(mix(c, target, w)), 1.0);
+  } else {
+    o = vec4(1.0 - exp(-(t + h.rgb)), 1.0);
+  }
 }`;
