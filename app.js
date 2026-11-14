@@ -1,0 +1,834 @@
+"use strict";
+
+// ---------------------------------------------------------------- settings
+const DEFAULTS = {
+  count: 150,
+  speed: 1.0,
+  flowScale: 1.6,
+  evolve: 0.12,
+  inertia: 0.92,
+  spread: 0.3,
+  tail: 0.5,
+  lineWidth: 3.5,
+  brightness: 1.0,
+  headGlow: 1.0,
+  headSize: 5,
+  tailGlow: 0.35,
+  colorMode: 'Rainbow',
+  hue: 0.58,
+  hueSpread: 0.3,
+  hueCycle: 0.02,
+  saturation: 0.85,
+  resolution: 1.0,
+  mirrors: 1,
+  mirrorSpin: 0.0,
+  attract: 1.0,
+  swirl: 0.35,
+  audioReact: 1.0,
+  audioSensitivity: 1.0,
+};
+const COLOR_MODES = ['Rainbow', 'Speed', 'Radial', 'Mono'];
+const STORAGE_KEY = 'particle-flow-settings-v2';
+
+const params = { ...DEFAULTS };
+try {
+  const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+  for (const k in DEFAULTS) if (k in saved && typeof saved[k] === typeof DEFAULTS[k]) params[k] = saved[k];
+} catch (e) { /* storage unavailable */ }
+let saveTimer = 0;
+function save() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(params)); } catch (e) {}
+  }, 300);
+}
+
+// ---------------------------------------------------------------- WebGL setup
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', {
+  antialias: false, alpha: false, depth: false, stencil: false,
+  premultipliedAlpha: false, powerPreference: 'high-performance',
+});
+function fail(msg) {
+  const el = document.getElementById('error');
+  el.textContent = msg; el.style.display = 'grid';
+  throw new Error(msg);
+}
+if (!gl) fail('This browser does not support WebGL2.');
+gl.getExtension('EXT_color_buffer_float');
+gl.getExtension('EXT_color_buffer_half_float');
+canvas.addEventListener('webglcontextlost', e => e.preventDefault());
+canvas.addEventListener('webglcontextrestored', () => location.reload());
+
+const NOISE = /* glsl */`
+vec3 mod289(vec3 x){return x-floor(x*(1.0/289.0))*289.0;}
+vec4 mod289(vec4 x){return x-floor(x*(1.0/289.0))*289.0;}
+vec4 permute(vec4 x){return mod289(((x*34.0)+1.0)*x);}
+vec4 taylorInvSqrt(vec4 r){return 1.79284291400159-0.85373472095314*r;}
+float snoise(vec3 v){
+  const vec2 C=vec2(1.0/6.0,1.0/3.0);
+  const vec4 D=vec4(0.0,0.5,1.0,2.0);
+  vec3 i=floor(v+dot(v,C.yyy));
+  vec3 x0=v-i+dot(i,C.xxx);
+  vec3 g=step(x0.yzx,x0.xyz);
+  vec3 l=1.0-g;
+  vec3 i1=min(g.xyz,l.zxy);
+  vec3 i2=max(g.xyz,l.zxy);
+  vec3 x1=x0-i1+C.xxx;
+  vec3 x2=x0-i2+C.yyy;
+  vec3 x3=x0-D.yyy;
+  i=mod289(i);
+  vec4 p=permute(permute(permute(i.z+vec4(0.0,i1.z,i2.z,1.0))+i.y+vec4(0.0,i1.y,i2.y,1.0))+i.x+vec4(0.0,i1.x,i2.x,1.0));
+  float n_=0.142857142857;
+  vec3 ns=n_*D.wyz-D.xzx;
+  vec4 j=p-49.0*floor(p*ns.z*ns.z);
+  vec4 x_=floor(j*ns.z);
+  vec4 y_=floor(j-7.0*x_);
+  vec4 x=x_*ns.x+ns.yyyy;
+  vec4 y=y_*ns.x+ns.yyyy;
+  vec4 h=1.0-abs(x)-abs(y);
+  vec4 b0=vec4(x.xy,y.xy);
+  vec4 b1=vec4(x.zw,y.zw);
+  vec4 s0=floor(b0)*2.0+1.0;
+  vec4 s1=floor(b1)*2.0+1.0;
+  vec4 sh=-step(h,vec4(0.0));
+  vec4 a0=b0.xzyw+s0.xzyw*sh.xxyy;
+  vec4 a1=b1.xzyw+s1.xzyw*sh.zzww;
+  vec3 p0=vec3(a0.xy,h.x);
+  vec3 p1=vec3(a0.zw,h.y);
+  vec3 p2=vec3(a1.xy,h.z);
+  vec3 p3=vec3(a1.zw,h.w);
+  vec4 norm=taylorInvSqrt(vec4(dot(p0,p0),dot(p1,p1),dot(p2,p2),dot(p3,p3)));
+  p0*=norm.x;p1*=norm.y;p2*=norm.z;p3*=norm.w;
+  vec4 m=max(0.6-vec4(dot(x0,x0),dot(x1,x1),dot(x2,x2),dot(x3,x3)),0.0);
+  m=m*m;
+  return 42.0*dot(m*m,vec4(dot(p0,x0),dot(p1,x1),dot(p2,x2),dot(p3,x3)));
+}`;
+
+// Simulation step, run with transform feedback (positions live on the GPU).
+// World space: y in [-1, 1], x in [-aspect, aspect].
+const UPDATE_VS = /* glsl */`#version 300 es
+precision highp float;
+precision highp int;
+layout(location=0) in vec2 a_pos;
+layout(location=1) in vec2 a_vel;
+layout(location=2) in vec2 a_prev;
+layout(location=3) in vec2 a_life;   // x: brightness (always 1), y: per-particle seed
+out vec2 v_pos; out vec2 v_vel; out vec2 v_prev; out vec2 v_life;
+uniform float u_dt, u_time, u_aspect, u_speed, u_scale, u_inertia, u_spread;
+uniform float u_attract, u_swirl, u_kick;
+uniform vec4 u_attr[4];              // xy: position, z: strength (0 = inactive)
+${NOISE}
+vec2 curl(vec3 q){
+  const float e = 0.02;
+  float a = snoise(q + vec3(0.0, e, 0.0)) - snoise(q - vec3(0.0, e, 0.0));
+  float b = snoise(q + vec3(e, 0.0, 0.0)) - snoise(q - vec3(e, 0.0, 0.0));
+  return vec2(a, -b) / (2.0 * e);
+}
+void main(){
+  vec2 p = a_pos, v = a_vel;
+  float life = a_life.x;
+
+  // Divergence-free flow field, so particles swirl without clumping.
+  vec3 q = vec3(p * u_scale, u_time);
+  vec2 flow = curl(q) + 0.5 * curl(q * 2.13 + vec3(13.1, 7.7, 3.3));
+  vec2 target = flow * (0.09 * u_speed);
+
+  for (int i = 0; i < 4; i++) {
+    vec4 A = u_attr[i];
+    if (A.z <= 0.0) continue;
+    vec2 d = A.xy - p;
+    float r = length(d) + 1e-4;
+    vec2 dir = d / r;
+    float near = smoothstep(0.0, 0.08, r);
+    target += (dir * near + vec2(-dir.y, dir.x) * u_swirl * (0.3 + near)) * (0.8 * u_attract * A.z);
+  }
+  target += normalize(p + 1e-4) * u_kick;   // sound beats push outward
+
+  // Each particle also drifts in its own slowly turning direction, so particles
+  // pulled together by a touch gradually spread out again.
+  float seed = a_life.y;
+  float ang = seed * 43.98 + u_time * (1.0 + seed * 2.0);
+  target += vec2(cos(ang), sin(ang)) * (0.1 * u_spread * u_speed);
+
+  v = mix(target, v, pow(u_inertia, u_dt * 60.0));
+  vec2 prev = p;
+  p += v * u_dt;
+
+  // Particles live forever: leaving one edge brings them back in at the opposite edge.
+  vec2 B = vec2(u_aspect + 0.05, 1.05);
+  if (any(greaterThan(abs(p), B))) {
+    p = mod(p + B, 2.0 * B) - B;
+    prev = p;   // no streak across the screen
+  }
+  v_pos = p; v_vel = v; v_prev = prev; v_life = vec2(life, seed);
+}`;
+const UPDATE_FS = `#version 300 es
+precision mediump float; out vec4 o; void main(){ o = vec4(0.0); }`;
+
+const COLOR_GLSL = /* glsl */`
+uniform float u_hue, u_hueSpread, u_sat, u_intensity;
+uniform int u_colorMode;
+vec3 hsv2rgb(vec3 c){
+  vec3 p = abs(fract(c.xxx + vec3(0.0, 2.0/3.0, 1.0/3.0)) * 6.0 - 3.0);
+  return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
+}
+vec3 particleColor(vec2 pos, vec2 vel, vec2 life){
+  float seed = life.y, h;
+  if (u_colorMode == 0)      h = u_hue + seed * u_hueSpread;
+  else if (u_colorMode == 1) h = u_hue + length(vel) * u_hueSpread * 2.5;
+  else if (u_colorMode == 2) h = u_hue + length(pos) * u_hueSpread;
+  else                       h = u_hue + (seed - 0.5) * 0.04;
+  return hsv2rgb(vec3(fract(h), u_sat, 1.0)) * u_intensity * smoothstep(0.0, 0.7, life.x);
+}`;
+
+// Tail: each frame, every particle adds one soft capsule (a segment with round ends)
+// from its previous to its current position into the fading trail buffer. Brightness
+// comes from the exact distance to the segment, so edges are smooth at any angle, and
+// round ends close the gaps at bends. Tails are blended with MAX, so overlapping ends
+// don't add up into bright dots.
+const TAIL_HALO = 4.0;   // the capsule reaches this many line half-widths out, to fit the glow halo
+const RENDER_VS = /* glsl */`#version 300 es
+precision highp float;
+layout(location=0) in vec2 a_pos;
+layout(location=1) in vec2 a_vel;
+layout(location=2) in vec2 a_prev;
+layout(location=3) in vec2 a_life;
+layout(location=4) in float a_corner;  // 0..3
+uniform float u_aspect, u_width;
+${COLOR_GLSL}
+out vec3 v_col; out vec2 v_pa; flat out vec2 v_ba;
+void main(){
+  float end = floor(a_corner * 0.5);
+  float side = mod(a_corner, 2.0) * 2.0 - 1.0;
+  vec2 d = a_pos - a_prev;
+  float len = length(d);
+  vec2 dir = len > 1e-6 ? d / len : vec2(1.0, 0.0);
+  vec2 n = vec2(-dir.y, dir.x);
+  float r = u_width * 0.5 * ${TAIL_HALO.toFixed(1)};
+  vec2 p = mix(a_prev, a_pos, end) + n * side * r + dir * (end * 2.0 - 1.0) * r;
+  gl_Position = vec4(p.x / u_aspect, p.y, 0.0, 1.0);
+  v_col = len > 1e-6 ? particleColor(a_pos, a_vel, a_life) : vec3(0.0);
+  v_pa = p - a_prev;
+  v_ba = d;
+}`;
+const RENDER_FS = /* glsl */`#version 300 es
+precision highp float;
+uniform float u_tailGlow, u_width;
+in vec3 v_col; in vec2 v_pa; flat in vec2 v_ba; out vec4 o;
+void main(){
+  float bb = dot(v_ba, v_ba);
+  float h = bb > 0.0 ? clamp(dot(v_pa, v_ba) / bb, 0.0, 1.0) : 0.0;
+  float x = length(v_pa - v_ba * h) / (u_width * 0.5);   // distance to the segment, in half-widths
+  float core = exp(-x * x * 1.2);
+  float halo = exp(-x * x * 0.18) * u_tailGlow;
+  o = vec4(v_col * (core + halo), 1.0);
+}`;
+
+// Head: a round glow sprite at each particle's current position. It is drawn into
+// its own buffer that is cleared every frame, so it never smears into the tail.
+const HEAD_VS = /* glsl */`#version 300 es
+precision highp float;
+layout(location=0) in vec2 a_pos;
+layout(location=1) in vec2 a_vel;
+layout(location=3) in vec2 a_life;
+layout(location=4) in float a_corner;
+uniform float u_aspect, u_headSize;
+${COLOR_GLSL}
+out vec3 v_col; out vec2 v_uv;
+void main(){
+  vec2 c = vec2(mod(a_corner, 2.0), floor(a_corner * 0.5)) * 2.0 - 1.0;
+  v_uv = c;
+  vec2 p = a_pos + c * u_headSize * 0.5;
+  gl_Position = vec4(p.x / u_aspect, p.y, 0.0, 1.0);
+  v_col = particleColor(a_pos, a_vel, a_life);
+}`;
+const HEAD_FS = /* glsl */`#version 300 es
+precision highp float;
+uniform float u_headGlow;
+in vec3 v_col; in vec2 v_uv; out vec4 o;
+void main(){
+  float r2 = dot(v_uv, v_uv);
+  float core = exp(-r2 * 45.0);
+  float glow = exp(-r2 * 6.0);
+  o = vec4(v_col * u_headGlow * (core * 2.0 + glow * 0.6), 1.0);
+}`;
+
+const QUAD_VS = `#version 300 es
+out vec2 v_uv;
+void main(){
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  v_uv = p; gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+const SOLID_FS = `#version 300 es
+precision highp float; uniform vec4 u_color; out vec4 o; void main(){ o = u_color; }`;
+
+// Final pass: kaleidoscope fold + tone mapping.
+const DISPLAY_FS = /* glsl */`#version 300 es
+precision highp float;
+in vec2 v_uv; out vec4 o;
+uniform sampler2D u_tex, u_head;
+uniform float u_aspect, u_segments, u_rot;
+void main(){
+  vec2 p = v_uv * 2.0 - 1.0;
+  p.x *= u_aspect;
+  if (u_segments > 1.5) {
+    float seg = 6.28318530718 / u_segments;
+    float a = mod(atan(p.y, p.x) - u_rot, seg);
+    a = min(a, seg - a) + u_rot;
+    p = length(p) * vec2(cos(a), sin(a));
+  }
+  vec2 uv = vec2(p.x / u_aspect, p.y) * 0.5 + 0.5;
+  vec3 c = texture(u_tex, uv).rgb + texture(u_head, uv).rgb;
+  o = vec4(1.0 - exp(-c), 1.0);
+}`;
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) fail('Shader error:\n' + gl.getShaderInfoLog(s));
+  return s;
+}
+function program(vs, fs, varyings) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  if (varyings) gl.transformFeedbackVaryings(p, varyings, gl.INTERLEAVED_ATTRIBS);
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) fail('Link error:\n' + gl.getProgramInfoLog(p));
+  const u = {};
+  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) {
+    const name = gl.getActiveUniform(p, i).name;
+    u[name.replace(/\[0\]$/, '')] = gl.getUniformLocation(p, name);
+  }
+  return { p, u };
+}
+
+const updateProg  = program(UPDATE_VS, UPDATE_FS, ['v_pos', 'v_vel', 'v_prev', 'v_life']);
+const renderProg  = program(RENDER_VS, RENDER_FS);
+const headProg    = program(HEAD_VS, HEAD_FS);
+const solidProg   = program(QUAD_VS, SOLID_FS);
+const displayProg = program(QUAD_VS, DISPLAY_FS);
+const emptyVAO = gl.createVertexArray();
+const tf = gl.createTransformFeedback();
+
+const cornerBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, cornerBuf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 1, 2, 3]), gl.STATIC_DRAW);
+
+// ---------------------------------------------------------------- particles
+const STRIDE = 32; // 8 floats per particle
+let count = 0, buffers = [], updateVAOs = [], renderVAOs = [], src = 0;
+let aspect = 1;
+
+function makeVAO(buf, instanced) {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  for (let i = 0; i < 4; i++) {
+    gl.enableVertexAttribArray(i);
+    gl.vertexAttribPointer(i, 2, gl.FLOAT, false, STRIDE, i * 8);
+    gl.vertexAttribDivisor(i, instanced ? 1 : 0);
+  }
+  if (instanced) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, cornerBuf);
+    gl.enableVertexAttribArray(4);
+    gl.vertexAttribPointer(4, 1, gl.FLOAT, false, 0, 0);
+  }
+  gl.bindVertexArray(null);
+  return vao;
+}
+
+function rebuildParticles() {
+  buffers.forEach(b => gl.deleteBuffer(b));
+  updateVAOs.concat(renderVAOs).forEach(v => gl.deleteVertexArray(v));
+  count = Math.max(1, Math.round(params.count));
+  const d = new Float32Array(count * 8);
+  for (let i = 0; i < count; i++) {
+    const x = (Math.random() * 2 - 1) * aspect, y = Math.random() * 2 - 1, o = i * 8;
+    d[o] = x; d[o + 1] = y; d[o + 4] = x; d[o + 5] = y;
+    d[o + 6] = 1;
+    d[o + 7] = Math.random();
+  }
+  buffers = [0, 1].map(() => {
+    const b = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, b);
+    gl.bufferData(gl.ARRAY_BUFFER, d, gl.DYNAMIC_COPY);
+    return b;
+  });
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  updateVAOs = buffers.map(b => makeVAO(b, false));
+  renderVAOs = buffers.map(b => makeVAO(b, true));
+  src = 0;
+}
+
+// ---------------------------------------------------------------- trail buffer
+let trail = null, head = null, floatTrail = false, fbW = 0, fbH = 0;
+
+function makeTrail(w, h) {
+  trail = makeTarget(trail, w, h);
+  head = makeTarget(head, w, h);
+  floatTrail = trail.float;
+  clearTrail();
+}
+function makeTarget(old, w, h) {
+  if (old) { gl.deleteTexture(old.tex); gl.deleteFramebuffer(old.fbo); }
+  const trailTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, trailTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.MIRRORED_REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.MIRRORED_REPEAT);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+
+  // Prefer a half-float buffer: smooth fades with no 8-bit "ghost" residue.
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, trailTex, 0);
+  const isFloat = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  if (!isFloat) {
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, trailTex, 0);
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return { tex: trailTex, fbo, float: isFloat };
+}
+function clearTrail() {
+  gl.clearColor(0, 0, 0, 1);
+  for (const t of [trail, head]) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2) * params.resolution;
+  const w = Math.max(1, Math.round(innerWidth * dpr));
+  const h = Math.max(1, Math.round(innerHeight * dpr));
+  if (w !== fbW || h !== fbH) {
+    fbW = canvas.width = w;
+    fbH = canvas.height = h;
+    makeTrail(w, h);
+  }
+  aspect = fbW / fbH;
+}
+addEventListener('resize', resize);
+
+// ---------------------------------------------------------------- kaleidoscope helper
+let rot = 0;
+// Same fold as the display shader, so touches pull particles to the spot you see.
+function fold(x, y) {
+  const n = Math.round(params.mirrors);
+  if (n < 2) return [x, y];
+  const seg = Math.PI * 2 / n;
+  let a = Math.atan2(y, x) - rot;
+  a = ((a % seg) + seg) % seg;
+  a = Math.min(a, seg - a) + rot;
+  const r = Math.hypot(x, y);
+  return [r * Math.cos(a), r * Math.sin(a)];
+}
+
+// ---------------------------------------------------------------- pointer input
+const pointers = new Map();
+function toWorld(e) {
+  const r = canvas.getBoundingClientRect();
+  return [((e.clientX - r.left) / r.width * 2 - 1) * aspect,
+          -((e.clientY - r.top) / r.height * 2 - 1)];
+}
+canvas.addEventListener('pointerdown', e => {
+  try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+  const [x, y] = toWorld(e);
+  pointers.set(e.pointerId, { x, y, s: 0, down: true });
+  hideHint();
+});
+canvas.addEventListener('pointermove', e => {
+  const p = pointers.get(e.pointerId);
+  if (p && p.down) [p.x, p.y] = toWorld(e);
+});
+const release = e => { const p = pointers.get(e.pointerId); if (p) p.down = false; };
+canvas.addEventListener('pointerup', release);
+canvas.addEventListener('pointercancel', release);
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+const attrData = new Float32Array(16);
+
+// ---------------------------------------------------------------- audio
+const audio = { ctx: null, analyser: null, data: null, srcNode: null, stream: null, el: null,
+                mode: 'off', bass: 0, mid: 0, high: 0, bassAvg: 0, kick: 0, lastKick: 0, hueKick: 0 };
+
+function ensureAudio() {
+  if (!audio.ctx) {
+    audio.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    audio.analyser = audio.ctx.createAnalyser();
+    audio.analyser.fftSize = 2048;
+    audio.analyser.smoothingTimeConstant = 0.7;
+    audio.analyser.minDecibels = -85;
+    audio.analyser.maxDecibels = -20;
+    audio.data = new Uint8Array(audio.analyser.frequencyBinCount);
+  }
+  audio.ctx.resume();
+}
+function stopAudio() {
+  if (audio.srcNode) { try { audio.srcNode.disconnect(); } catch (e) {} audio.srcNode = null; }
+  if (audio.stream) { audio.stream.getTracks().forEach(t => t.stop()); audio.stream = null; }
+  if (audio.el) { audio.el.pause(); URL.revokeObjectURL(audio.el.src); audio.el = null; }
+  audio.mode = 'off';
+  document.getElementById('meter').style.display = 'none';
+}
+async function startMic() {
+  try {
+    ensureAudio();
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    stopAudio();
+    audio.stream = stream;
+    audio.srcNode = audio.ctx.createMediaStreamSource(stream);
+    audio.srcNode.connect(audio.analyser);   // not to the speakers: avoids feedback
+    audio.mode = 'mic';
+    document.getElementById('meter').style.display = 'flex';
+  } catch (e) {
+    showHint('Microphone unavailable: ' + (e.message || e.name) + '. It needs https or localhost.');
+  }
+}
+// Computer audio: the screen-share prompt can include system audio
+// (Chrome/Edge on Windows: pick "Entire screen" and tick "Share system audio").
+async function startSystemAudio() {
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    showHint('This browser cannot capture computer audio. Use Chrome or Edge.');
+    return;
+  }
+  try {
+    ensureAudio();
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,   // required by browsers; the video track is disabled below
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      systemAudio: 'include',
+      selfBrowserSurface: 'exclude',
+    });
+    const tracks = stream.getAudioTracks();
+    if (!tracks.length) {
+      stream.getTracks().forEach(t => t.stop());
+      showHint('No audio was shared. Choose "Entire screen" and tick "Share system audio".');
+      return;
+    }
+    stopAudio();
+    stream.getVideoTracks().forEach(t => t.enabled = false);
+    audio.stream = stream;
+    audio.srcNode = audio.ctx.createMediaStreamSource(new MediaStream(tracks));
+    audio.srcNode.connect(audio.analyser);   // not to the speakers: you already hear it
+    audio.mode = 'system';
+    tracks[0].addEventListener('ended', () => { if (audio.stream === stream) stopAudio(); });
+    document.getElementById('meter').style.display = 'flex';
+  } catch (e) {
+    if (e.name !== 'NotAllowedError') showHint('Could not capture computer audio: ' + (e.message || e.name));
+  }
+}
+function startFile(file) {
+  ensureAudio();
+  stopAudio();
+  const el = new Audio(URL.createObjectURL(file));
+  el.loop = true;
+  audio.el = el;
+  audio.srcNode = audio.ctx.createMediaElementSource(el);
+  audio.srcNode.connect(audio.analyser);
+  audio.srcNode.connect(audio.ctx.destination);
+  el.play();
+  audio.mode = 'file';
+  document.getElementById('meter').style.display = 'flex';
+}
+const fileInput = document.getElementById('file');
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) startFile(fileInput.files[0]); fileInput.value = ''; });
+
+function analyzeAudio(dt, time) {
+  const ease = (cur, target, rate) => cur + (target - cur) * Math.min(1, dt * rate);
+  if (audio.mode === 'off') {
+    audio.bass = ease(audio.bass, 0, 5); audio.mid = ease(audio.mid, 0, 5); audio.high = ease(audio.high, 0, 5);
+    audio.kick *= Math.exp(-dt * 5);
+    return;
+  }
+  const d = audio.data, hz = audio.ctx.sampleRate / audio.analyser.fftSize;
+  audio.analyser.getByteFrequencyData(d);
+  const band = (lo, hi) => {
+    const a = Math.max(1, Math.floor(lo / hz)), b = Math.min(d.length - 1, Math.ceil(hi / hz));
+    let s = 0; for (let i = a; i <= b; i++) s += d[i];
+    return s / ((b - a + 1) * 255);
+  };
+  const sens = params.audioSensitivity;
+  const shape = v => Math.min(1, Math.max(0, (v - 0.12) * 1.6 * sens));
+  const b = band(20, 150), m = band(150, 2000), h = band(2000, 10000);
+  audio.bass = ease(audio.bass, shape(b), 15);
+  audio.mid  = ease(audio.mid,  shape(m * 1.2), 12);
+  audio.high = ease(audio.high, shape(h * 1.8), 8);
+  audio.bassAvg = ease(audio.bassAvg, b, 1.5);
+  if (b > audio.bassAvg * 1.25 + 0.04 / sens && time - audio.lastKick > 0.18) {
+    audio.kick = 1; audio.lastKick = time; audio.hueKick += 0.06;
+  }
+  audio.kick *= Math.exp(-dt * 5);
+  const bars = document.getElementById('meter').children;
+  [audio.bass, audio.mid, audio.high].forEach((v, i) => bars[i].style.height = (2 + v * 38) + 'px');
+}
+
+// ---------------------------------------------------------------- hint
+const hintEl = document.getElementById('hint');
+let hintTimer = setTimeout(hideHint, 7000);
+function hideHint() { hintEl.style.opacity = 0; }
+function showHint(text) {
+  hintEl.textContent = text; hintEl.style.opacity = 1;
+  clearTimeout(hintTimer); hintTimer = setTimeout(hideHint, 6000);
+}
+
+// ---------------------------------------------------------------- UI
+const rand = (a, b) => a + Math.random() * (b - a);
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+let gui = null;
+function refreshGui() { if (gui) gui.controllersRecursive().forEach(c => c.updateDisplay()); }
+
+const actions = {
+  mic: startMic,
+  system: startSystemAudio,
+  file: () => fileInput.click(),
+  stopAudio,
+  clear: clearTrail,
+  fullscreen() {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen?.().catch(() => {});
+  },
+  randomize() {
+    Object.assign(params, {
+      flowScale: rand(0.6, 4), evolve: rand(0.03, 0.35), inertia: rand(0.8, 0.97),
+      tail: rand(0.45, 0.85), hue: Math.random(), hueSpread: rand(0, 0.6),
+      hueCycle: rand(0, 0.06), saturation: rand(0.5, 1), swirl: rand(-1, 1),
+      colorMode: pick(COLOR_MODES), mirrors: pick([1, 1, 3, 4, 5, 6, 8, 12]),
+      mirrorSpin: pick([0, 0, rand(-0.15, 0.15)]),
+    });
+    refreshGui(); save();
+  },
+  reset() {
+    const oldCount = params.count;
+    Object.assign(params, DEFAULTS);
+    if (params.count !== oldCount) rebuildParticles();
+    resize(); refreshGui(); save();
+  },
+};
+
+if (window.lil) {
+  gui = new lil.GUI({ title: 'Particle Flow', container: document.getElementById('panel') });
+  const fP = gui.addFolder('Particles');
+  fP.add(params, 'count', 10, 20000, 10).name('Count').onFinishChange(rebuildParticles);
+  fP.add(params, 'speed', 0, 4, 0.01).name('Speed');
+  fP.add(params, 'flowScale', 0.2, 6, 0.01).name('Flow scale');
+  fP.add(params, 'evolve', 0, 1, 0.01).name('Flow change');
+  fP.add(params, 'inertia', 0, 0.99, 0.01).name('Smoothness');
+  fP.add(params, 'spread', 0, 2, 0.01).name('Spread');
+  const fL = gui.addFolder('Look');
+  fL.add(params, 'tail', 0, 1, 0.001).name('Tail length');
+  fL.add(params, 'lineWidth', 0.5, 12, 0.1).name('Line width');
+  fL.add(params, 'brightness', 0.05, 4, 0.01).name('Brightness');
+  fL.add(params, 'headGlow', 0, 4, 0.01).name('Head glow');
+  fL.add(params, 'headSize', 2, 16, 0.1).name('Head size');
+  fL.add(params, 'tailGlow', 0, 2, 0.01).name('Tail glow');
+  fL.add(params, 'colorMode', COLOR_MODES).name('Color mode');
+  fL.add(params, 'hue', 0, 1, 0.001).name('Hue');
+  fL.add(params, 'hueSpread', 0, 1, 0.001).name('Hue spread');
+  fL.add(params, 'hueCycle', 0, 0.3, 0.001).name('Hue cycling');
+  fL.add(params, 'saturation', 0, 1, 0.01).name('Saturation');
+  fL.add(params, 'resolution', 0.5, 1, 0.05).name('Resolution').onFinishChange(resize);
+  const fK = gui.addFolder('Kaleidoscope');
+  fK.add(params, 'mirrors', 1, 16, 1).name('Segments (1 = off)');
+  fK.add(params, 'mirrorSpin', -1, 1, 0.01).name('Rotation speed');
+  const fT = gui.addFolder('Touch');
+  fT.add(params, 'attract', 0, 3, 0.01).name('Attraction');
+  fT.add(params, 'swirl', -2, 2, 0.01).name('Swirl');
+  const fS = gui.addFolder('Sound');
+  fS.add(actions, 'system').name('Capture computer audio');
+  fS.add(actions, 'mic').name('Use microphone');
+  fS.add(actions, 'file').name('Play audio file…');
+  fS.add(actions, 'stopAudio').name('Stop audio');
+  fS.add(params, 'audioReact', 0, 3, 0.01).name('Reaction');
+  fS.add(params, 'audioSensitivity', 0.2, 4, 0.01).name('Sensitivity');
+  gui.add(actions, 'randomize').name('Randomize (R)');
+  gui.add(actions, 'clear').name('Clear (C)');
+  gui.add(actions, 'fullscreen').name('Fullscreen (F)');
+  gui.add(actions, 'reset').name('Reset settings');
+  gui.onChange(save);
+}
+
+// ---------------------------------------------------------------- settings corner
+const corner = document.getElementById('corner');
+const tile = document.getElementById('tile');
+let closeTimer = 0, pressingPanel = false;
+function setPanelOpen(open) {
+  corner.classList.toggle('open', open);
+  tile.setAttribute('aria-expanded', String(open));
+  if (!open) corner.classList.remove('show');
+}
+tile.addEventListener('click', () => setPanelOpen(!corner.classList.contains('open')));
+function scheduleClose() {
+  clearTimeout(closeTimer);
+  closeTimer = setTimeout(() => {
+    const a = document.activeElement;
+    // keep it open while dragging a slider or using a dropdown
+    if (pressingPanel || (a && a.tagName === 'SELECT' && corner.contains(a))) return scheduleClose();
+    setPanelOpen(false);
+  }, 700);
+}
+corner.addEventListener('pointerenter', () => clearTimeout(closeTimer));
+corner.addEventListener('pointerleave', e => { if (e.pointerType !== 'touch') scheduleClose(); });
+corner.addEventListener('pointerdown', () => { pressingPanel = true; corner.classList.add('show'); });
+addEventListener('pointerup', () => { pressingPanel = false; });
+addEventListener('pointercancel', () => { pressingPanel = false; });
+canvas.addEventListener('pointerdown', () => setPanelOpen(false));   // tap the canvas to dismiss on touch screens
+
+let paused = false;
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  switch (e.key.toLowerCase()) {
+    case 'h': setPanelOpen(!corner.classList.contains('open')); break;
+    case 'f': actions.fullscreen(); break;
+    case 'c': clearTrail(); break;
+    case 'r': actions.randomize(); break;
+    case 'm': params.mirrors = params.mirrors >= 12 ? 1 : params.mirrors < 3 ? 3 : params.mirrors + (params.mirrors < 8 ? 1 : 4);
+              refreshGui(); save(); break;
+    case ' ': paused = !paused; e.preventDefault(); break;
+  }
+});
+
+// ---------------------------------------------------------------- frame loop
+resize();
+rebuildParticles();
+let last = performance.now(), time = 0, flowTime = 0, hueTime = 0, frame = 0;
+
+function frameLoop(now) {
+  requestAnimationFrame(frameLoop);
+  const realDt = Math.min(0.05, Math.max(0, (now - last) / 1000));
+  last = now;
+  const dt = paused ? 0 : realDt;
+  time += realDt;
+  resize();
+  analyzeAudio(realDt, time);
+
+  const react = params.audioReact;
+  const speedMul = 1 + audio.bass * react * 1.5;
+  const brightMul = 1 + audio.mid * react * 1.2;
+  // Highs pulse the head size. The tail keeps a steady width: a width that changes
+  // every frame would be baked into the tail as jagged steps.
+  const headMul = 1 + audio.high * react * 1.2;
+  flowTime += dt * params.evolve * speedMul;
+  hueTime += dt * params.hueCycle;
+  rot += dt * params.mirrorSpin;
+
+  // attractors (up to 4 touches), folded into kaleidoscope space
+  attrData.fill(0);
+  let k = 0;
+  for (const [id, p] of pointers) {
+    p.s = p.down ? Math.min(1, p.s + realDt * 4) : p.s - realDt * 3;
+    if (p.s <= 0 && !p.down) { pointers.delete(id); continue; }
+    if (k < 4) {
+      const [fx, fy] = fold(p.x, p.y);
+      attrData[k * 4] = fx; attrData[k * 4 + 1] = fy; attrData[k * 4 + 2] = Math.max(0, p.s);
+      k++;
+    }
+  }
+
+  // 1. simulate
+  if (dt > 0) {
+    const s = 1 - src, u = updateProg.u;
+    gl.useProgram(updateProg.p);
+    gl.uniform1f(u.u_dt, dt);
+    gl.uniform1f(u.u_time, flowTime);
+    gl.uniform1f(u.u_aspect, aspect);
+    gl.uniform1f(u.u_speed, params.speed * speedMul);
+    gl.uniform1f(u.u_scale, params.flowScale);
+    gl.uniform1f(u.u_inertia, params.inertia);
+    gl.uniform1f(u.u_spread, params.spread);
+    gl.uniform1f(u.u_attract, params.attract);
+    gl.uniform1f(u.u_swirl, params.swirl);
+    gl.uniform1f(u.u_kick, audio.kick * react * 0.8);
+    gl.uniform4fv(u.u_attr, attrData);
+    gl.bindVertexArray(updateVAOs[src]);
+    gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, tf);
+    gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, buffers[s]);
+    gl.enable(gl.RASTERIZER_DISCARD);
+    gl.beginTransformFeedback(gl.POINTS);
+    gl.drawArrays(gl.POINTS, 0, count);
+    gl.endTransformFeedback();
+    gl.disable(gl.RASTERIZER_DISCARD);
+    gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null);
+    gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+    src = s;
+  }
+
+  // 2. fade the trail buffer, then add this frame's particle segments
+  gl.bindFramebuffer(gl.FRAMEBUFFER, trail.fbo);
+  gl.viewport(0, 0, fbW, fbH);
+  gl.enable(gl.BLEND);
+  if (dt > 0) {
+    const fade = Math.pow(1 - Math.pow(10, -(0.7 + params.tail * 2.3)), dt * 60);
+    gl.useProgram(solidProg.p);
+    gl.bindVertexArray(emptyVAO);
+    gl.blendEquation(gl.FUNC_ADD);
+    gl.blendFunc(gl.ZERO, gl.SRC_ALPHA);            // dst *= fade
+    gl.uniform4f(solidProg.u.u_color, 0, 0, 0, fade);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    if (!floatTrail) {                                // 8-bit fallback: subtract to reach true black
+      gl.blendEquation(gl.FUNC_REVERSE_SUBTRACT);
+      gl.blendFunc(gl.ONE, gl.ONE);
+      gl.uniform4f(solidProg.u.u_color, 1 / 255, 1 / 255, 1 / 255, 0);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    const px = 2 / fbH;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2) * params.resolution;
+    const widthPx = Math.max(1, params.lineWidth * dpr);
+    const densityComp = Math.min(8, Math.max(0.3, Math.sqrt(20000 / count)));
+    const setColor = u => {
+      gl.uniform1f(u.u_aspect, aspect);
+      gl.uniform1f(u.u_hue, params.hue + hueTime + audio.hueKick * react);
+      gl.uniform1f(u.u_hueSpread, params.hueSpread);
+      gl.uniform1f(u.u_sat, params.saturation);
+      gl.uniform1f(u.u_intensity, params.brightness * 0.12 * brightMul * densityComp);
+      gl.uniform1i(u.u_colorMode, Math.max(0, COLOR_MODES.indexOf(params.colorMode)));
+    };
+    gl.blendEquation(gl.FUNC_ADD);
+    gl.blendFunc(gl.ONE, gl.ONE);                     // additive glow
+    gl.bindVertexArray(renderVAOs[src]);
+
+    gl.useProgram(renderProg.p);
+    gl.blendEquation(gl.MAX);                         // tails: overlapping ends don't stack
+    setColor(renderProg.u);
+    gl.uniform1f(renderProg.u.u_width, widthPx * px);
+    gl.uniform1f(renderProg.u.u_tailGlow, params.tailGlow);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+
+    // heads: fresh every frame
+    gl.bindFramebuffer(gl.FRAMEBUFFER, head.fbo);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.blendEquation(gl.FUNC_ADD);                    // heads: additive glow
+    gl.useProgram(headProg.p);
+    setColor(headProg.u);
+    gl.uniform1f(headProg.u.u_headSize, widthPx * params.headSize * headMul * px);
+    gl.uniform1f(headProg.u.u_headGlow, params.headGlow);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+  }
+  gl.disable(gl.BLEND);
+
+  // 3. show it, through the kaleidoscope
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, fbW, fbH);
+  gl.useProgram(displayProg.p);
+  gl.bindVertexArray(emptyVAO);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, trail.tex);
+  gl.uniform1i(displayProg.u.u_tex, 0);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, head.tex);
+  gl.uniform1i(displayProg.u.u_head, 1);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.uniform1f(displayProg.u.u_aspect, aspect);
+  gl.uniform1f(displayProg.u.u_segments, Math.round(params.mirrors));
+  gl.uniform1f(displayProg.u.u_rot, rot);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+requestAnimationFrame(frameLoop);
