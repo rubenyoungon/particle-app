@@ -12,13 +12,9 @@ python -m http.server 5173
 
 Then open http://localhost:5173.
 
-## Sound sources
+## Sound
 
-Open the **Sound** folder in the settings panel:
-
-- **Capture computer audio**: reacts to whatever your computer plays (Spotify, YouTube, games). In the browser's share prompt, pick **Entire screen** and tick **Share system audio**. This works in Chrome or Edge on Windows. On macOS, Chrome can only share audio from a single tab. Only the audio is used.
-- **Use microphone**
-- **Play audio file…**
+Open the **Sound** folder in the settings panel and click **Capture computer audio**. The particles then react to whatever your computer plays (Spotify, YouTube, games). In the browser's share prompt, pick **Entire screen** and tick **Share system audio**. This works in Chrome or Edge on Windows. On macOS, Chrome can only share audio from a single tab. Only the audio is used.
 
 ## Controls
 
@@ -50,7 +46,7 @@ No build step: `index.html` loads `js/main.js` as an ES module, which imports th
 | `js/particles.js` | Particle buffers: creating them and rebuilding when Count changes |
 | `js/render-targets.js` | Trail and head buffers, resizing with the window |
 | `js/input.js` | Mouse and touch attraction, kaleidoscope fold |
-| `js/audio.js` | Computer audio, microphone and file input, sound analysis |
+| `js/audio.js` | Computer audio capture and sound analysis |
 | `js/ui.js` | Settings panel, corner tile, keyboard shortcuts |
 | `js/hint.js` | The message at the bottom of the screen |
 

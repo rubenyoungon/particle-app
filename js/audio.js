@@ -1,14 +1,13 @@
-// Sound input (computer audio, microphone or a file) and analysis into bass/mid/high levels.
+// Sound input (computer audio) and analysis into bass/mid/high levels.
 
 import { params } from './settings.js';
 import { showHint } from './hint.js';
 
 // Levels are 0..1. kick is 1 on a bass beat and decays; hueKick grows with each beat.
-export const audio = { ctx: null, analyser: null, data: null, srcNode: null, stream: null, el: null,
+export const audio = { ctx: null, analyser: null, data: null, srcNode: null, stream: null,
                        mode: 'off', bass: 0, mid: 0, high: 0, bassAvg: 0, kick: 0, lastKick: 0, hueKick: 0 };
 
 const meter = document.getElementById('meter');
-const fileInput = document.getElementById('file');
 
 function ensureAudio() {
   if (!audio.ctx) {
@@ -26,25 +25,8 @@ function ensureAudio() {
 export function stopAudio() {
   if (audio.srcNode) { try { audio.srcNode.disconnect(); } catch (e) {} audio.srcNode = null; }
   if (audio.stream) { audio.stream.getTracks().forEach(t => t.stop()); audio.stream = null; }
-  if (audio.el) { audio.el.pause(); URL.revokeObjectURL(audio.el.src); audio.el = null; }
   audio.mode = 'off';
   meter.style.display = 'none';
-}
-
-export async function startMic() {
-  try {
-    ensureAudio();
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
-    stopAudio();
-    audio.stream = stream;
-    audio.srcNode = audio.ctx.createMediaStreamSource(stream);
-    audio.srcNode.connect(audio.analyser);   // not to the speakers: avoids feedback
-    audio.mode = 'mic';
-    meter.style.display = 'flex';
-  } catch (e) {
-    showHint('Microphone unavailable: ' + (e.message || e.name) + '. It needs https or localhost.');
-  }
 }
 
 // Computer audio: the screen-share prompt can include system audio
@@ -80,23 +62,6 @@ export async function startSystemAudio() {
     if (e.name !== 'NotAllowedError') showHint('Could not capture computer audio: ' + (e.message || e.name));
   }
 }
-
-function startFile(file) {
-  ensureAudio();
-  stopAudio();
-  const el = new Audio(URL.createObjectURL(file));
-  el.loop = true;
-  audio.el = el;
-  audio.srcNode = audio.ctx.createMediaElementSource(el);
-  audio.srcNode.connect(audio.analyser);
-  audio.srcNode.connect(audio.ctx.destination);
-  el.play();
-  audio.mode = 'file';
-  meter.style.display = 'flex';
-}
-
-export function pickAudioFile() { fileInput.click(); }
-fileInput.addEventListener('change', () => { if (fileInput.files[0]) startFile(fileInput.files[0]); fileInput.value = ''; });
 
 // Called once per frame: updates audio.bass/mid/high/kick and the level meter.
 export function analyzeAudio(dt, time) {

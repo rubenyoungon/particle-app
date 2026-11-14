@@ -4,7 +4,7 @@ import { params, DEFAULTS, COLOR_MODES, save } from './settings.js';
 import { canvas } from './gl.js';
 import { resize, clearTrail } from './render-targets.js';
 import { rebuildParticles } from './particles.js';
-import { startMic, startSystemAudio, stopAudio, pickAudioFile } from './audio.js';
+import { startSystemAudio, stopAudio } from './audio.js';
 
 // paused: read by the frame loop.
 export const ui = { paused: false };
@@ -15,9 +15,7 @@ let gui = null;
 function refreshGui() { if (gui) gui.controllersRecursive().forEach(c => c.updateDisplay()); }
 
 const actions = {
-  mic: startMic,
   system: startSystemAudio,
-  file: pickAudioFile,
   stopAudio,
   clear: clearTrail,
   fullscreen() {
@@ -74,8 +72,6 @@ if (window.lil) {
   fT.add(params, 'swirl', -2, 2, 0.01).name('Swirl');
   const fS = gui.addFolder('Sound');
   fS.add(actions, 'system').name('Capture computer audio');
-  fS.add(actions, 'mic').name('Use microphone');
-  fS.add(actions, 'file').name('Play audio file…');
   fS.add(actions, 'stopAudio').name('Stop audio');
   fS.add(params, 'audioReact', 0, 3, 0.01).name('Reaction');
   fS.add(params, 'audioSensitivity', 0.2, 4, 0.01).name('Sensitivity');
