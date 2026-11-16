@@ -14,9 +14,6 @@ rebuildParticles();
 
 // Fountain flow (share of particles in the air) when no audio is being captured.
 const IDLE_FLOW = 0.5;
-// Share of the parked fountain particles launched at once on each beat.
-const BEAT_BURST = 0.5;
-
 let last = performance.now(), time = 0, flowTime = 0, hueTime = 0, fountainYaw = 0;
 
 function frameLoop(now) {
@@ -42,21 +39,24 @@ function frameLoop(now) {
 
   if (dt > 0) {
     if (fountain) {
+      const bandLevel = (audio.bass + audio.mid + audio.high) / 3;
+      const bandReaction = Math.min(1, react);
+      const bands = audio.mode === 'off' ? [1, 1, 1] : [
+        bandLevel + (audio.bass - bandLevel) * bandReaction,
+        bandLevel + (audio.mid - bandLevel) * bandReaction,
+        bandLevel + (audio.high - bandLevel) * bandReaction,
+      ];
       simulateFountain(dt, {
         time,
         height: params.fountainHeight,
         ring: params.fountainRing,
-        // Only the rhythm drives the fountain: each beat gives an upward boost
-        // (capped by the shader at MAX_RISE times a normal arc's height).
+        bands,
+        // Beats boost the selected height range, subject to the shader's cap.
         power: 1,
         kick: audio.kick * react * 0.7,
-        // With computer audio captured, each beat launches a burst of the parked
-        // particles at once, followed by a short tail as the kick decays, with
-        // only a trickle in between while music is audible. With no audio
-        // captured it blows steadily at IDLE_FLOW.
+        // Each band contributes to the launch rate; beats briefly increase it.
         flow: audio.mode === 'off' ? IDLE_FLOW
-            : Math.min(1, audio.level * 4) * (0.1 + 0.4 * audio.kick),
-        burst: audio.beat ? Math.min(0.9, BEAT_BURST * react) : 0,
+            : Math.min(0.9, (audio.bass + audio.mid + audio.high) * 0.25 * (1 + 0.8 * audio.kick * react)),
       });
     } else {
       simulate(dt, {

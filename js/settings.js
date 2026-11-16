@@ -33,7 +33,7 @@ export const DEFAULTS = {
   fountainTail: 0.12,    // Fountain's own tail length (Flow uses tail)
   fountainSoftness: 1.5, // Softness: 0 = sharp, up to 4 = render at 1/16 size and blur up    // blob diameter; the screen is 2 units tall
   fountainHeight: 0.6,
-  fountainRing: 0.35,    // radius of the ring where the fountain's particles land
+  fountainRing: 0.35,    // approximate landing radius of the fountain's spray
   fountainLower: 0.6,    // blue (lower) fountain height relative to the red one
   fountainTilt: 0.2,
   fountainSpin: 0.1,

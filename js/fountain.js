@@ -1,7 +1,7 @@
 // Fountain mode: two 3D particle fountains seen from slightly above, sharing one
 // nozzle. A red fountain sprays up; below it a blue mirror image of it, just as
-// wide but less tall, sprays down. Red heads and tails have a yellow middle,
-// blue ones a light blue one.
+// wide but less tall, sprays down. Red heads and tails have a warm molten
+// middle, blue ones a light blue one.
 //
 // Per particle (8 floats): position.xyz, velocity.xyz, age, life.y.
 // life.y packs two values: its fraction is the particle's random seed, its whole
@@ -14,8 +14,8 @@
 // again when they come back down to the middle. There both bounce off the
 // meeting plane (red up, blue down, mirrored), skipping outward in a run of low
 // hops, then park hidden at the nozzle. Parked particles launch again at the
-// flow rate main.js sets: in bursts on the music's beats, or steadily
-// when no audio is captured. Where red and blue heads overlap a lot,
+// flow rate main.js sets: faster after music beats, or steadily when no audio
+// is captured. Where red and blue heads overlap a lot,
 // the display pass turns them whiter.
 // The draw passes project to the 2D screen space used by the rest of the app
 // and draw into the shared trail/head buffers.
@@ -52,9 +52,8 @@ layout(location=1) in vec3 a_vel;
 layout(location=2) in vec2 a_life;   // x: age in seconds (< 0: waiting to launch), y: bounces + seed
 out vec3 v_pos; out vec3 v_vel; out vec2 v_life;
 uniform float u_dt, u_time, u_height, u_ring, u_power, u_kick, u_rate;
-uniform float u_burst;   // share of parked particles to launch this frame at once (on a beat)
-// Strong gravity with matching fast launches: arcs reach the same height as
-// before but faster, so a beat's burst peaks soon after it.
+uniform vec3 u_bands;   // relative launch rates for low, medium and high arcs
+// Strong gravity with matching fast launches makes the spray respond quickly.
 const float GRAVITY = ${GRAVITY.toFixed(1)};
 const float SPEED = ${Math.sqrt(GRAVITY / 3).toFixed(4)};   // launch speed scale for the same height
 
@@ -68,12 +67,6 @@ float hash(vec2 p){
 // Upward launch speed of a normal (no bass, no beat) launch.
 float baseUp(){ return 2.45 * SPEED * sqrt(u_height); }
 
-// Horizontal direction from the nozzle out to the particle.
-vec2 radialDir(vec3 p, vec3 v){
-  if (dot(p.xz, p.xz) > 1e-8) return normalize(p.xz);
-  return dot(v.xz, v.xz) > 1e-12 ? normalize(v.xz) : vec2(1.0, 0.0);
-}
-
 void main(){
   vec3 p = a_pos, v = a_vel;
   float seed = fract(a_life.y), bounces = floor(a_life.y), age = a_life.x + u_dt;
@@ -81,13 +74,11 @@ void main(){
   bool launch = false, done = false;
 
   if (waiting) {
-    // Parked at the nozzle: launch at random, at u_rate launches per second
-    // (set from the music's beats), plus a u_burst share all at once on a beat.
+    // Parked at the nozzle: launch independently at the music-driven rate.
     age = -1.0;
-    launch = hash(vec2(seed * 613.0, fract(u_time * 0.0191) * 7919.0)) < u_rate * u_dt + u_burst;
+    launch = hash(vec2(seed * 613.0, fract(u_time * 0.0191) * 7919.0)) < 1.0 - exp(-u_rate * u_dt);
   } else {
-    // No air drag and only a whisper of turbulence on the way up and down, so
-    // each particle lands where its launch aimed it: on the ring.
+    // Light turbulence keeps the landing area close to the target ring.
     if (bounces < 0.5) {
       float t = u_time * 1.7 + seed * 40.0;
       v.xz += vec2(sin(t), cos(t * 1.3)) * 0.015 * u_dt;
@@ -100,9 +91,6 @@ void main(){
       if (bounces < ${MAX_BOUNCES.toFixed(1)}) {
         p.y = ${FLOOR.toFixed(2)} - p.y;
         v.y = -v.y * (bounces < 0.5 ? ${RESTITUTION_FIRST.toFixed(2)} : ${RESTITUTION.toFixed(2)});
-        // After the first landing, skip outward at a normal launch's sideways
-        // speed whatever the arc was, so every particle hops the same way.
-        if (bounces < 0.5) v.xz = radialDir(p, v) * (u_ring / (2.0 * baseUp() / GRAVITY));
         v.xz *= 0.95;
         bounces += 1.0;
       } else {
@@ -121,19 +109,22 @@ void main(){
 
   if (launch) {
     vec2 k = vec2(seed * 977.0, fract(u_time * 0.0137) * 6151.0);
-    float r1 = hash(k), r3 = hash(k + 3.1), r4 = hash(k + 5.3);
+    float r1 = hash(k), r2 = hash(k + 1.7), r3 = hash(k + 3.1);
+    float r4 = hash(k + 5.3), r5 = hash(k + 7.9), r6 = hash(k + 11.3);
     float ang = r1 * 6.2831853;
     vec3 dir = vec3(cos(ang), 0.0, sin(ang));
-    // One spray: every particle goes up and outward in a random direction.
-    // Its upward speed varies a little (and grows with bass and beats). However
-    // high it flies, it lands on the ring (radius u_ring): its sideways speed is
-    // constant, set so it covers the distance to the ring over its flight time
-    // (a plain parabola: higher arcs are just steeper, not wider).
-    float up = (mix(2.4, 2.5, r3) * sqrt(u_height) * u_power + u_kick) * SPEED;   // height grows with up^2
-    up = min(up, baseUp() * ${Math.sqrt(MAX_RISE).toFixed(4)});           // at most MAX_RISE times as high
+    // Keep some particles on the ring, with the rest landing close to it.
+    // Choose the arc height from the frequency bands, then vary it within that band.
+    float radius = u_ring * (r2 < 0.4 ? 1.0 : mix(0.85, 1.15, r5));
+    float band = r6 * (u_bands.x + u_bands.y + u_bands.z);
+    float heightFraction = band < u_bands.x ? mix(0.4, 0.6, r3)
+                         : band < u_bands.x + u_bands.y ? mix(0.6, 0.8, r3)
+                         : mix(0.8, 1.0, r3);
+    float up = (2.45 * sqrt(u_height) * u_power + u_kick) * SPEED;
+    up = min(up, baseUp() * ${Math.sqrt(MAX_RISE).toFixed(4)}) * sqrt(heightFraction);
     float flight = 2.0 * up / GRAVITY;                                   // time until it is back at y = 0
-    float start = 0.03 * r4;
-    v = dir * (max(0.0, u_ring - start) / flight) + vec3(0.0, up, 0.0);
+    float start = min(radius, 0.03 * r4);
+    v = dir * (max(0.0, radius - start) / flight) + vec3(0.0, up, 0.0);
     p = dir * start;
     age = 0.0;
     bounces = 0.0;
@@ -191,19 +182,22 @@ vec3 grade(vec3 c){
   return c * u_intensity;
 }
 
-// One colour per fountain, the same at every height: bright red and blue.
+// Red particles cool gently as they age, with a little variation between them.
+float lavaHeat(vec2 life){
+  return clamp(0.85 - 0.13 * max(life.x, 0.0) + 0.12 * (fract(life.y) - 0.5), 0.48, 0.9);
+}
+
 vec3 fountainColor(vec3 pos, vec2 life){
   return grade(isLower()
     ? vec3(0.1, 0.22, 1.0)
-    : vec3(1.0, 0.18, 0.1) * 1.8);   // bright red
+    : mix(vec3(1.45, 0.16, 0.045), vec3(1.8, 0.38, 0.09), lavaHeat(life)));
 }
 
-// Each fountain's secondary colour, which fills the middle of its heads:
-// yellow for the red fountain, light blue for the blue one.
-vec3 fountainSecondary(){
+// The warmer centres of red particles cool toward orange; blue stays light blue.
+vec3 fountainSecondary(vec2 life){
   return grade(isLower()
-    ? vec3(0.35, 0.78, 1.0)          // light blue
-    : vec3(1.0, 0.8, 0.1) * 1.4);    // yellow
+    ? vec3(0.35, 0.78, 1.0)
+    : mix(vec3(1.35, 0.56, 0.05), vec3(1.4, 1.05, 0.12), lavaHeat(life)));
 }`;
 
 const TAIL_HALO = 1.5;   // capsule reach in half-widths: just past the edge (no halo)
@@ -237,7 +231,7 @@ void main(){
   bool live = a_life.x > u_dt;    // no tail on the launch frame
   float fade = live && len > 1e-6 ? fountainFade(a_pos, a_life) : 0.0;
   v_col = fountainColor(a_pos, a_life) * fade;
-  v_col2 = fountainSecondary() * fade;
+  v_col2 = fountainSecondary(a_life) * fade;
   v_pa = p - prv;
   v_ba = d;
 }`;
@@ -245,17 +239,24 @@ void main(){
 const HEAD_VS = /* glsl */`#version 300 es
 precision highp float;
 layout(location=0) in vec3 a_pos;
+layout(location=1) in vec3 a_vel;
 layout(location=2) in vec2 a_life;
 layout(location=4) in float a_corner;
 uniform float u_headSize;
 ${COMMON}
-out vec3 v_col; out vec3 v_col2; out vec2 v_uv; out float v_alpha;
+out vec3 v_col; out vec3 v_col2; out vec2 v_uv; out float v_alpha; flat out float v_drop;
 void main(){
-  v_col2 = fountainSecondary();
+  v_col2 = fountainSecondary(a_life);
   vec2 c = vec2(mod(a_corner, 2.0), floor(a_corner * 0.5)) * 2.0 - 1.0;
   v_uv = c;
   vec3 s = project(toWorld(a_pos));
-  vec2 p = s.xy + c * u_headSize * 0.5 * s.z;   // nearer heads look bigger
+  vec2 motion = s.xy - project(toWorld(a_pos - a_vel * 0.02)).xy;
+  float speed = length(motion) / 0.02;
+  vec2 dir = speed > 1e-4 ? normalize(motion) : vec2(0.0, 1.0);
+  vec2 side = vec2(dir.y, -dir.x);
+  v_drop = smoothstep(0.15, 1.5, speed);
+  vec2 offset = side * c.x + dir * c.y * (1.0 + 0.25 * v_drop);
+  vec2 p = s.xy + offset * u_headSize * 0.5 * s.z;   // nearer heads look bigger
   // Depth: nearer heads (bigger perspective scale) get a smaller value, so the
   // depth test lets them hide the heads behind them.
   gl_Position = vec4(p.x / u_aspect, p.y, clamp(1.5 - s.z, -1.0, 1.0), 1.0);
@@ -279,7 +280,7 @@ void main(){
   o = vec4(col * (1.0 - smoothstep(r * ${EDGE_SOFT_START}, r, d)), 1.0);   // soft edge
 }`;
 
-// Head: an opaque disc filling its quad, darkening and fading out toward its
+// Head: a soft-edged droplet, darkening and fading out toward its
 // edge, with no glow. It is composited *over* the trails in its own colour (not added as
 // light, which looked like see-through glare). It is brightest in the centre,
 // where its colour also turns toward white.
@@ -290,11 +291,12 @@ const HEAD_FS = /* glsl */`#version 300 es
 precision highp float;
 uniform float u_headGlow, u_lowerPass;
 uniform float u_depthPass;   // 1: depth-only prepass (writes depth for the solid core)
-in vec3 v_col; in vec3 v_col2; in vec2 v_uv; in float v_alpha;
+in vec3 v_col; in vec3 v_col2; in vec2 v_uv; in float v_alpha; flat in float v_drop;
 layout(location=0) out vec4 o;
 layout(location=1) out vec4 o_cover;
 void main(){
-  float r = length(v_uv);
+  float width = 1.0 - 0.28 * v_drop * (1.0 - smoothstep(-1.0, 0.65, v_uv.y));
+  float r = length(vec2(v_uv.x / width, v_uv.y));
   float a = (1.0 - smoothstep(${EDGE_SOFT_START}, 1.0, r)) * v_alpha;   // solid middle, soft edge
   if (u_depthPass > 0.5) {
     // Only the mostly solid part of a head blocks what is behind it; its soft
@@ -380,9 +382,8 @@ export function rebuildFountain() {
   F.src = 0;
 }
 
-// s: { time, height, ring (landing radius), power, kick,
-//      flow (0..1: 0 = no new launches, 1 = a full stream),
-//      burst (0..1: share of parked particles to launch at once this frame) }
+// s: { time, height, ring (approximate landing radius), bands ([bass, mid, high]), power, kick,
+//      flow (0..1: 0 = no new launches, 1 = a full stream) }
 export function simulateFountain(dt, s) {
   if (!F.count) rebuildFountain();
   const dst = 1 - F.src, u = updateProg.u;
@@ -396,9 +397,9 @@ export function simulateFountain(dt, s) {
   gl.uniform1f(u.u_time, s.time);
   gl.uniform1f(u.u_height, s.height);
   gl.uniform1f(u.u_ring, s.ring);
+  gl.uniform3f(u.u_bands, s.bands[0], s.bands[1], s.bands[2]);
   gl.uniform1f(u.u_power, s.power);
   gl.uniform1f(u.u_kick, s.kick);
-  gl.uniform1f(u.u_burst, s.burst || 0);
   gl.bindVertexArray(F.updateVAOs[F.src]);
   gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, tf);
   gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, F.buffers[dst]);
@@ -413,7 +414,7 @@ export function simulateFountain(dt, s) {
 }
 
 // Each particle adds a soft-edged tail segment into the fading trail buffer
-// (light, tone-mapped on display), and an opaque disc head that the display
+// (light, tone-mapped on display), and a solid droplet head that the display
 // pass lays over it.
 // look: { widthPx (tail width, scaled by perspective like the heads),
 //         headSizePx (head diameter), intensity (tails),
