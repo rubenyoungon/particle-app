@@ -9,7 +9,7 @@ Both have kaleidoscope mirrors and sound response.
 
 ## Run
 
-The code uses JavaScript modules, which browsers only load from a web server, so opening `index.html` directly from disk doesn't work. Serve the folder with a local server:
+The code uses JavaScript modules, which browsers only load from a web server, so opening `public/index.html` directly from disk doesn't work. Serve the folder with a local server:
 
 ```bash
 python -m http.server 5173
@@ -42,23 +42,23 @@ Settings are saved in the browser automatically.
 
 ## Code layout
 
-No build step: `index.html` loads `js/main.js` as an ES module, which imports the rest.
+No build step: `public/index.html` loads `public/js` as an ES module, which imports the rest.
 
 | File | Contents |
 |---|---|
-| `index.html`, `style.css` | Page structure and styles |
-| `js/main.js` | Startup and the per-frame loop |
-| `js/settings.js` | Default settings, saving and loading them |
-| `js/shaders.js` | GPU shader code: noise, simulation, tails, heads, kaleidoscope |
-| `js/gl.js` | WebGL2 context and shader program helpers |
-| `js/renderer.js` | The GPU passes run each frame: simulate, fade, draw, show |
-| `js/particles.js` | Particle buffers: creating them and rebuilding when Count changes |
-| `js/fountain.js` | Fountain mode: its 3D simulation, camera projection, colours and draw passes |
-| `js/render-targets.js` | Trail and head buffers, resizing with the window |
-| `js/input.js` | Mouse and touch attraction, kaleidoscope fold |
-| `js/audio.js` | Computer audio capture and sound analysis |
-| `js/ui.js` | Settings panel, corner tile, keyboard shortcuts |
-| `js/hint.js` | The message at the bottom of the screen |
+| `public/index.html`, `public/style.css` | Page structure and styles |
+| `public/js` | Startup and the per-frame loop |
+| `public/js` | Default settings, saving and loading them |
+| `public/js` | GPU shader code: noise, simulation, tails, heads, kaleidoscope |
+| `public/js` | WebGL2 context and shader program helpers |
+| `public/js` | The GPU passes run each frame: simulate, fade, draw, show |
+| `public/js` | Particle buffers: creating them and rebuilding when Count changes |
+| `public/js` | Fountain mode: its 3D simulation, camera projection, colours and draw passes |
+| `public/js` | Trail and head buffers, resizing with the window |
+| `public/js` | Mouse and touch attraction, kaleidoscope fold |
+| `public/js` | Computer audio capture and sound analysis |
+| `public/js` | Settings panel, corner tile, keyboard shortcuts |
+| `public/js` | The message at the bottom of the screen |
 
 ## How it works
 
