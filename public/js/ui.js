@@ -1,10 +1,8 @@
-// Settings panel (lil-gui), the top-right corner tile, and keyboard shortcuts.
+// Settings panel, the top-right corner tile, and keyboard shortcuts.
 
-import { params, DEFAULTS, MODES, COLOR_MODES, save } from './settings.js';
-import { rebuildFountain } from './fountain.js';
+import { params, MODES, COLOR_MODES, save } from './settings.js';
 import { canvas } from './gl.js';
-import { resize, clearTrail } from './render-targets.js';
-import { rebuildParticles } from './particles.js';
+import { clearTrail } from './render-targets.js';
 import { startSystemAudio, stopAudio } from './audio.js';
 
 // paused: read by the frame loop.
@@ -12,14 +10,18 @@ export const ui = { paused: false };
 
 const rand = (a, b) => a + Math.random() * (b - a);
 const pick = arr => arr[Math.floor(Math.random() * arr.length)];
-let gui = null;
-function refreshGui() { if (gui) gui.controllersRecursive().forEach(c => c.updateDisplay()); }
+const sliders = ['mirrors', 'mirrorSpin', 'audioReact', 'audioSensitivity'];
+function refreshControls() {
+  document.getElementById('mode').value = params.mode;
+  for (const key of sliders) {
+    const input = document.getElementById(key);
+    input.value = params[key];
+    document.querySelector(`output[for="${key}"]`).textContent = input.value;
+  }
+}
 
 const actions = {
-  system: startSystemAudio,
-  stopAudio,
-  clear: clearTrail,
-  stopSpin() { params.mirrorSpin = 0; refreshGui(); save(); },
+  stopSpin() { params.mirrorSpin = 0; refreshControls(); save(); },
   fullscreen() {
     if (document.fullscreenElement) document.exitFullscreen();
     else document.documentElement.requestFullscreen?.().catch(() => {});
@@ -30,7 +32,7 @@ const actions = {
         fountainHeight: rand(0.7, 1.4), fountainRing: rand(0.15, 0.6),
         fountainTail: rand(0.05, 0.3),
       });
-      refreshGui(); save();
+      refreshControls(); save();
       return;
     }
     Object.assign(params, {
@@ -40,25 +42,14 @@ const actions = {
       colorMode: pick(COLOR_MODES), mirrors: pick([1, 1, 3, 4, 5, 6, 8, 12]),
       mirrorSpin: pick([0, 0, rand(-0.15, 0.15)]),
     });
-    refreshGui(); save();
-  },
-  reset() {
-    const oldCount = params.count, oldFountain = params.fountainCount, oldMode = params.mode;
-    Object.assign(params, DEFAULTS);
-    if (params.count !== oldCount) rebuildParticles();
-    if (params.fountainCount !== oldFountain) rebuildFountain();
-    shownMode = params.mode;   // defaults already hold both modes' kaleidoscope values
-    if (params.mode !== oldMode) applyMode();
-    resize(); refreshGui(); save();
+    refreshControls(); save();
   },
   toggleMode() {
     params.mode = MODES[(MODES.indexOf(params.mode) + 1) % MODES.length];
-    applyMode(); refreshGui(); save();
+    applyMode();
   },
 };
 
-// Show only the panel controls that the current mode uses. Set once the panel exists.
-let showModeControls = () => {};
 // Each mode keeps its own kaleidoscope settings: mirrors/mirrorSpin are the active
 // mode's values, otherMirrors/otherMirrorSpin the other mode's. Switching swaps them.
 let shownMode = params.mode;
@@ -69,76 +60,35 @@ function applyMode() {
     shownMode = params.mode;
   }
   clearTrail();
-  showModeControls(params.mode === 'Fountain');
-  refreshGui(); save();
+  refreshControls(); save();
 }
 
 // ---------------------------------------------------------------- settings panel
-// lil-gui is loaded from a CDN as a classic script; without it the app runs with no panel.
-if (window.lil) {
-  gui = new lil.GUI({ title: 'Particle Flow', container: document.getElementById('panel') });
-  gui.add(params, 'mode', MODES).name('Visual (V)').onChange(applyMode);
-  const fF = gui.addFolder('Fountain');
-  fF.add(params, 'fountainCount', 20, 5000, 10).name('Count').onFinishChange(rebuildFountain);
-  fF.add(params, 'fountainScale', 0.3, 8, 0.01).name('Particle size');
-  fF.add(params, 'fountainTail', 0, 1, 0.001).name('Tail length');
-  fF.add(params, 'fountainSoftness', 0, 4, 0.05).name('Softness');  fF.add(params, 'fountainHeight', 0.3, 2, 0.01).name('Height');
-  fF.add(params, 'fountainLower', 0.1, 1, 0.01).name('Blue fountain height');
-  fF.add(params, 'fountainRing', 0, 1.2, 0.01).name('Ring radius');
-  fF.add(params, 'fountainTilt', -0.2, 1.2, 0.01).name('Camera tilt');
-  fF.add(params, 'fountainSpin', -1, 1, 0.01).name('Camera orbit');
-  const fP = gui.addFolder('Particles');
-  fP.add(params, 'count', 10, 20000, 10).name('Count').onFinishChange(rebuildParticles);
-  fP.add(params, 'speed', 0, 4, 0.01).name('Speed');
-  fP.add(params, 'flowScale', 0.2, 6, 0.01).name('Flow scale');
-  fP.add(params, 'evolve', 0, 1, 0.01).name('Flow change');
-  fP.add(params, 'inertia', 0, 0.99, 0.01).name('Smoothness');
-  fP.add(params, 'spread', 0, 2, 0.01).name('Spread');
-  const fL = gui.addFolder('Look');
-  const tailCtrl = fL.add(params, 'tail', 0, 1, 0.001).name('Tail length');
-  fL.add(params, 'lineWidth', 0.5, 12, 0.1).name('Line width');
-  fL.add(params, 'brightness', 0.05, 4, 0.01).name('Brightness');
-  fL.add(params, 'headGlow', 0, 4, 0.01).name('Head glow');
-  fL.add(params, 'headSize', 2, 16, 0.1).name('Head size');
-  const tailGlowCtrl = fL.add(params, 'tailGlow', 0, 2, 0.01).name('Tail glow');
-  // The fountain colours by height, so the hue controls only apply to Flow.
-  const hueCtrls = [
-    fL.add(params, 'colorMode', COLOR_MODES).name('Color mode'),
-    fL.add(params, 'hue', 0, 1, 0.001).name('Hue'),
-    fL.add(params, 'hueSpread', 0, 1, 0.001).name('Hue spread'),
-    fL.add(params, 'hueCycle', 0, 0.3, 0.001).name('Hue cycling'),
-  ];
-  fL.add(params, 'saturation', 0, 1, 0.01).name('Saturation');
-  fL.add(params, 'resolution', 0.5, 1, 0.05).name('Resolution').onFinishChange(resize);
-  const fK = gui.addFolder('Kaleidoscope');
-  fK.add(params, 'mirrors', 1, 16, 1).name('Segments (1 = off)');
-  // Rotation speed snaps to 0 near the middle of the slider, so it's easy to stop by hand.
-  const spin = fK.add(params, 'mirrorSpin', -1, 1, 0.01).name('Rotation speed').onChange(v => {
-    if (v !== 0 && Math.abs(v) < 0.05) { params.mirrorSpin = 0; spin.updateDisplay(); }
+document.getElementById('mode').addEventListener('change', e => {
+  params.mode = e.target.value;
+  applyMode();
+});
+for (const key of sliders) {
+  const input = document.getElementById(key);
+  if (key === 'mirrorSpin') {
+    input.addEventListener('keydown', e => {
+      if (params.mirrorSpin !== 0 || !['ArrowLeft', 'ArrowDown', 'ArrowRight', 'ArrowUp'].includes(e.key)) return;
+      input.value = e.key === 'ArrowLeft' || e.key === 'ArrowDown' ? -0.05 : 0.05;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      e.preventDefault();
+    });
+  }
+  input.addEventListener('input', () => {
+    const value = Number(input.value);
+    params[key] = key === 'mirrorSpin' && Math.abs(value) < 0.05 ? 0 : value;
+    refreshControls();
+    save();
   });
-  fK.add(actions, 'stopSpin').name('Stop rotation (0)');
-  const fT = gui.addFolder('Touch');
-  fT.add(params, 'attract', 0, 3, 0.01).name('Attraction');
-  fT.add(params, 'swirl', -2, 2, 0.01).name('Swirl');
-  const fS = gui.addFolder('Sound');
-  fS.add(actions, 'system').name('Capture computer audio');
-  fS.add(actions, 'stopAudio').name('Stop audio');
-  fS.add(params, 'audioReact', 0, 3, 0.01).name('Reaction');
-  fS.add(params, 'audioSensitivity', 0.2, 4, 0.01).name('Sensitivity');
-  gui.add(actions, 'randomize').name('Randomize (R)');
-  gui.add(actions, 'clear').name('Clear (C)');
-  gui.add(actions, 'fullscreen').name('Fullscreen (F)');
-  gui.add(actions, 'reset').name('Reset settings');
-  gui.onChange(save);
-  showModeControls = fountain => {
-    fF.show(fountain);
-    fP.show(!fountain);
-    fT.show(!fountain);
-    // Fountain has its own Tail length (in its folder) and crisp tails with no glow
-    [...hueCtrls, tailCtrl, tailGlowCtrl].forEach(c => c.show(!fountain));
-  };
-  showModeControls(params.mode === 'Fountain');
 }
+document.getElementById('stopSpin').addEventListener('click', actions.stopSpin);
+document.getElementById('captureAudio').addEventListener('click', startSystemAudio);
+document.getElementById('stopAudio').addEventListener('click', stopAudio);
+refreshControls();
 
 // ---------------------------------------------------------------- settings corner
 // Hovering the top-right corner shows a tile; clicking it opens the panel.
@@ -157,8 +107,8 @@ function scheduleClose() {
   clearTimeout(closeTimer);
   closeTimer = setTimeout(() => {
     const a = document.activeElement;
-    // keep it open while dragging a slider or using a dropdown
-    if (pressingPanel || (a && a.tagName === 'SELECT' && corner.contains(a))) return scheduleClose();
+    // Keep the panel open while dragging, using the dropdown, or navigating by keyboard.
+    if (pressingPanel || (a && corner.contains(a) && (a.tagName === 'SELECT' || a.matches(':focus-visible')))) return scheduleClose();
     setPanelOpen(false);
   }, 700);
 }
@@ -171,7 +121,12 @@ canvas.addEventListener('pointerdown', () => setPanelOpen(false));   // tap the 
 
 // ---------------------------------------------------------------- keyboard
 addEventListener('keydown', e => {
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (corner.contains(e.target) && e.key === 'Escape') {
+    setPanelOpen(false);
+    tile.focus();
+    return;
+  }
+  if (corner.contains(e.target)) return;
   switch (e.key.toLowerCase()) {
     case 'h': setPanelOpen(!corner.classList.contains('open')); break;
     case 'f': actions.fullscreen(); break;
@@ -180,7 +135,7 @@ addEventListener('keydown', e => {
     case 'v': actions.toggleMode(); break;
     case '0': actions.stopSpin(); break;
     case 'm': params.mirrors = params.mirrors >= 12 ? 1 : params.mirrors < 3 ? 3 : params.mirrors + (params.mirrors < 8 ? 1 : 4);
-              refreshGui(); save(); break;
+              refreshControls(); save(); break;
     case ' ': ui.paused = !ui.paused; e.preventDefault(); break;
   }
 });

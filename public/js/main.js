@@ -93,7 +93,7 @@ function frameLoop(now) {
       });
     } else drawParticles({
       widthPx,
-      headSizePx: widthPx * params.headSize,
+      headSizePx: widthPx * params.headSize * 0.5,
       hue: params.hue + hueTime + audio.hueKick * react,
       hueSpread: params.hueSpread,
       saturation: params.saturation,

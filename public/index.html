@@ -14,7 +14,7 @@
 <canvas id="c"></canvas>
 <div id="hint">Hold the mouse or touch to pull particles · settings in the top-right corner</div>
 <div id="corner">
-  <button id="tile" type="button" aria-label="Settings" title="Settings (H)" aria-expanded="false">
+  <button id="tile" type="button" aria-label="Settings" title="Settings (H)" aria-expanded="false" aria-controls="panel">
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <line x1="4" y1="6" x2="20" y2="6"/><circle cx="9" cy="6" r="2" fill="currentColor"/>
@@ -22,12 +22,40 @@
       <line x1="4" y1="18" x2="20" y2="18"/><circle cx="8" cy="18" r="2" fill="currentColor"/>
     </svg>
   </button>
-  <div id="panel"></div>
+  <div id="panel" aria-label="Settings">
+    <div class="visual-setting">
+      <label for="mode">Visual (V)</label>
+      <select id="mode">
+        <option value="Flow">Flow</option>
+        <option value="Fountain">Fountain</option>
+      </select>
+    </div>
+    <details open>
+      <summary>Kaleidoscope</summary>
+      <div class="settings-group">
+        <label for="mirrors">Segments (1 = off) <output for="mirrors"></output></label>
+        <input id="mirrors" type="range" min="1" max="16" step="1">
+        <label for="mirrorSpin">Rotation speed <output for="mirrorSpin"></output></label>
+        <input id="mirrorSpin" type="range" min="-1" max="1" step="0.01">
+        <button id="stopSpin" type="button">Stop rotation (0)</button>
+      </div>
+    </details>
+    <details open>
+      <summary>Sound</summary>
+      <div class="settings-group">
+        <button id="captureAudio" type="button">Capture computer audio</button>
+        <button id="stopAudio" type="button">Stop audio</button>
+        <label for="audioReact">Reaction <output for="audioReact"></output></label>
+        <input id="audioReact" type="range" min="0" max="3" step="0.01">
+        <label for="audioSensitivity">Sensitivity <output for="audioSensitivity"></output></label>
+        <input id="audioSensitivity" type="range" min="0.2" max="4" step="0.01">
+      </div>
+    </details>
+  </div>
 </div>
 <div id="meter"><div></div><div></div><div></div></div>
 <div id="error"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/lil-gui@0.19.2/dist/lil-gui.umd.min.js"></script>
 <script type="module" src="js/main.js"></script>
 </body>
 </html>
